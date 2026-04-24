@@ -1,0 +1,144 @@
+/**
+ * OpenProject Sync — Google AI Edge Gallery JS Skill
+ *
+ * Entry: window.ai_edge_gallery_get_result(data, secret)
+ *   data   — JSON string from LLM: { action, ...params }
+ *   secret — "https://op-url.com::api-key"
+ */
+
+window.ai_edge_gallery_get_result = async function (data, secret) {
+  try {
+    const params = JSON.parse(data);
+    const [baseUrl, apiKey] = (secret || "").split("::");
+
+    if (!baseUrl || !apiKey) {
+      return JSON.stringify({ error: "Secret format invalid. Expected: https://your-op-url.com::your-api-key" });
+    }
+
+    const headers = {
+      Authorization: "Basic " + btoa("apikey:" + apiKey),
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    };
+
+    const api = baseUrl.replace(/\/$/, "") + "/api/v3";
+
+    const result = await route(params, api, headers);
+    return JSON.stringify({ result });
+  } catch (err) {
+    return JSON.stringify({ error: err.message || String(err) });
+  }
+};
+
+async function route(params, api, headers) {
+  switch (params.action) {
+    case "list":
+      return listWPs(params, api, headers);
+    case "list-query":
+      return listQuery(params, api, headers);
+    case "get":
+      return getWP(params, api, headers);
+    case "create":
+      return createWP(params, api, headers);
+    case "update":
+      return updateWP(params, api, headers);
+    case "priority":
+      return setPriority(params, api, headers);
+    default:
+      throw new Error("Unknown action: " + params.action);
+  }
+}
+
+async function listWPs({ project_id }, api, headers) {
+  const url = `${api}/projects/${project_id}/work_packages?filters=[{"status":{"operator":"o","values":[]}}]&pageSize=50`;
+  const res = await fetch(url, { headers });
+  const json = await res.json();
+  if (!res.ok) throw new Error(json.message || res.statusText);
+  return (json._embedded?.elements || []).map(formatWP);
+}
+
+async function listQuery({ query_id }, api, headers) {
+  const res = await fetch(`${api}/work_packages?queryId=${query_id}&pageSize=50`, { headers });
+  const json = await res.json();
+  if (!res.ok) throw new Error(json.message || res.statusText);
+  return (json._embedded?.elements || []).map(formatWP);
+}
+
+async function getWP({ wp_id }, api, headers) {
+  const res = await fetch(`${api}/work_packages/${wp_id}`, { headers });
+  const json = await res.json();
+  if (!res.ok) throw new Error(json.message || res.statusText);
+  return formatWP(json);
+}
+
+async function createWP({ project_id, subject, type_id = 1 }, api, headers) {
+  const body = {
+    subject,
+    _links: {
+      type: { href: `${api}/types/${type_id}` },
+      project: { href: `${api}/projects/${project_id}` },
+    },
+  };
+  const res = await fetch(`${api}/work_packages`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(body),
+  });
+  const json = await res.json();
+  if (!res.ok) throw new Error(json.message || res.statusText);
+  return { created: true, id: json.id, subject: json.subject };
+}
+
+async function updateWP({ wp_id, status_id, note }, api, headers) {
+  // fetch current lockVersion first
+  const current = await fetch(`${api}/work_packages/${wp_id}`, { headers }).then((r) => r.json());
+  const lockVersion = current.lockVersion;
+
+  const body = {
+    lockVersion,
+    _links: { status: { href: `${api}/statuses/${status_id}` } },
+  };
+  if (note) {
+    body.comment = { raw: note };
+  }
+
+  const res = await fetch(`${api}/work_packages/${wp_id}`, {
+    method: "PATCH",
+    headers,
+    body: JSON.stringify(body),
+  });
+  const json = await res.json();
+  if (!res.ok) throw new Error(json.message || res.statusText);
+  return { updated: true, id: json.id, status: json._links?.status?.title };
+}
+
+async function setPriority({ wp_id, priority_id }, api, headers) {
+  const current = await fetch(`${api}/work_packages/${wp_id}`, { headers }).then((r) => r.json());
+  const lockVersion = current.lockVersion;
+
+  const body = {
+    lockVersion,
+    _links: { priority: { href: `${api}/priorities/${priority_id}` } },
+  };
+
+  const res = await fetch(`${api}/work_packages/${wp_id}`, {
+    method: "PATCH",
+    headers,
+    body: JSON.stringify(body),
+  });
+  const json = await res.json();
+  if (!res.ok) throw new Error(json.message || res.statusText);
+  return { updated: true, id: json.id, priority: json._links?.priority?.title };
+}
+
+function formatWP(wp) {
+  return {
+    id: wp.id,
+    subject: wp.subject,
+    status: wp._links?.status?.title,
+    priority: wp._links?.priority?.title,
+    assignee: wp._links?.assignee?.title || null,
+    type: wp._links?.type?.title,
+    updatedAt: wp.updatedAt,
+  };
+}
