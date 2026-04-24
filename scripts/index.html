@@ -1,127 +1,113 @@
-<!DOCTYPE html>
-<html>
-<head><meta charset="utf-8"></head>
-<body>
-<script>
-window.ai_edge_gallery_get_result = async function (data, secret) {
-  try {
-    const params = JSON.parse(data);
-    const [baseUrl, apiKey] = (secret || "").split("::");
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OpenProject Sync</title>
+  </head>
+  <body>
+    <script>
+      async function opRequest(api, headers, method, path, body) {
+        const res = await fetch(api + path, {
+          method,
+          headers,
+          body: body ? JSON.stringify(body) : undefined,
+        });
+        const json = await res.json();
+        if (!res.ok) throw new Error(json.message || res.statusText);
+        return json;
+      }
 
-    if (!baseUrl || !apiKey) {
-      return JSON.stringify({ error: "Secret format invalid. Expected: https://your-op-url.com::your-api-key" });
-    }
+      function formatWP(wp) {
+        return {
+          id:        wp.id,
+          subject:   wp.subject,
+          status:    wp._links?.status?.title,
+          priority:  wp._links?.priority?.title,
+          assignee:  wp._links?.assignee?.title || null,
+          type:      wp._links?.type?.title,
+          updatedAt: wp.updatedAt,
+        };
+      }
 
-    const headers = {
-      Authorization: "Basic " + btoa("apikey:" + apiKey),
-      "Content-Type": "application/json",
-      Accept: "application/json",
-    };
+      window["ai_edge_gallery_get_result"] = async (data) => {
+        try {
+          const p = JSON.parse(data);
+          if (!p.op_url)     return JSON.stringify({ error: "op_url is required." });
+          if (!p.op_api_key) return JSON.stringify({ error: "op_api_key is required." });
 
-    const api = baseUrl.replace(/\/$/, "") + "/api/v3";
-    const result = await route(params, api, headers);
-    return JSON.stringify({ result });
-  } catch (err) {
-    return JSON.stringify({ error: err.message || String(err) });
-  }
-};
+          const api = p.op_url.replace(/\/$/, "") + "/api/v3";
+          const headers = {
+            Authorization: "Basic " + btoa("apikey:" + p.op_api_key),
+            "Content-Type": "application/json",
+            Accept: "application/json",
+          };
 
-async function route(params, api, headers) {
-  switch (params.action) {
-    case "list":       return listWPs(params, api, headers);
-    case "list-query": return listQuery(params, api, headers);
-    case "get":        return getWP(params, api, headers);
-    case "create":     return createWP(params, api, headers);
-    case "update":     return updateWP(params, api, headers);
-    case "priority":   return setPriority(params, api, headers);
-    default: throw new Error("Unknown action: " + params.action);
-  }
-}
+          let result;
 
-async function listWPs({ project_id }, api, headers) {
-  const url = `${api}/projects/${project_id}/work_packages?filters=[{"status":{"operator":"o","values":[]}}]&pageSize=50`;
-  const res = await fetch(url, { headers });
-  const json = await res.json();
-  if (!res.ok) throw new Error(json.message || res.statusText);
-  return (json._embedded?.elements || []).map(formatWP);
-}
+          if (p.action === "list") {
+            if (!p.project_id) return JSON.stringify({ error: "project_id is required for list." });
+            const json = await opRequest(api, headers, "GET",
+              `/projects/${p.project_id}/work_packages?filters=[{"status":{"operator":"o","values":[]}}]&pageSize=50`);
+            result = (json._embedded?.elements || []).map(formatWP);
 
-async function listQuery({ query_id }, api, headers) {
-  const res = await fetch(`${api}/work_packages?queryId=${query_id}&pageSize=50`, { headers });
-  const json = await res.json();
-  if (!res.ok) throw new Error(json.message || res.statusText);
-  return (json._embedded?.elements || []).map(formatWP);
-}
+          } else if (p.action === "list-query") {
+            if (!p.query_id) return JSON.stringify({ error: "query_id is required for list-query." });
+            const json = await opRequest(api, headers, "GET",
+              `/work_packages?queryId=${p.query_id}&pageSize=50`);
+            result = (json._embedded?.elements || []).map(formatWP);
 
-async function getWP({ wp_id }, api, headers) {
-  const res = await fetch(`${api}/work_packages/${wp_id}`, { headers });
-  const json = await res.json();
-  if (!res.ok) throw new Error(json.message || res.statusText);
-  return formatWP(json);
-}
+          } else if (p.action === "get") {
+            if (!p.wp_id) return JSON.stringify({ error: "wp_id is required for get." });
+            const json = await opRequest(api, headers, "GET", `/work_packages/${p.wp_id}`);
+            result = formatWP(json);
 
-async function createWP({ project_id, subject, type_id = 1 }, api, headers) {
-  const body = {
-    subject,
-    _links: {
-      type:    { href: `${api}/types/${type_id}` },
-      project: { href: `${api}/projects/${project_id}` },
-    },
-  };
-  const res = await fetch(`${api}/work_packages`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(body),
-  });
-  const json = await res.json();
-  if (!res.ok) throw new Error(json.message || res.statusText);
-  return { created: true, id: json.id, subject: json.subject };
-}
+          } else if (p.action === "create") {
+            if (!p.project_id) return JSON.stringify({ error: "project_id is required for create." });
+            if (!p.subject)    return JSON.stringify({ error: "subject is required for create." });
+            const body = {
+              subject: p.subject,
+              _links: {
+                type:    { href: `${api}/types/${p.type_id || 1}` },
+                project: { href: `${api}/projects/${p.project_id}` },
+              },
+            };
+            const json = await opRequest(api, headers, "POST", "/work_packages", body);
+            result = { created: true, id: json.id, subject: json.subject };
 
-async function updateWP({ wp_id, status_id, note }, api, headers) {
-  const current = await fetch(`${api}/work_packages/${wp_id}`, { headers }).then(r => r.json());
-  const body = {
-    lockVersion: current.lockVersion,
-    _links: { status: { href: `${api}/statuses/${status_id}` } },
-  };
-  if (note) body.comment = { raw: note };
-  const res = await fetch(`${api}/work_packages/${wp_id}`, {
-    method: "PATCH",
-    headers,
-    body: JSON.stringify(body),
-  });
-  const json = await res.json();
-  if (!res.ok) throw new Error(json.message || res.statusText);
-  return { updated: true, id: json.id, status: json._links?.status?.title };
-}
+          } else if (p.action === "update") {
+            if (!p.wp_id)     return JSON.stringify({ error: "wp_id is required for update." });
+            if (!p.status_id) return JSON.stringify({ error: "status_id is required for update." });
+            const current = await opRequest(api, headers, "GET", `/work_packages/${p.wp_id}`);
+            const body = {
+              lockVersion: current.lockVersion,
+              _links: { status: { href: `${api}/statuses/${p.status_id}` } },
+            };
+            if (p.note) body.comment = { raw: p.note };
+            const json = await opRequest(api, headers, "PATCH", `/work_packages/${p.wp_id}`, body);
+            result = { updated: true, id: json.id, status: json._links?.status?.title };
 
-async function setPriority({ wp_id, priority_id }, api, headers) {
-  const current = await fetch(`${api}/work_packages/${wp_id}`, { headers }).then(r => r.json());
-  const body = {
-    lockVersion: current.lockVersion,
-    _links: { priority: { href: `${api}/priorities/${priority_id}` } },
-  };
-  const res = await fetch(`${api}/work_packages/${wp_id}`, {
-    method: "PATCH",
-    headers,
-    body: JSON.stringify(body),
-  });
-  const json = await res.json();
-  if (!res.ok) throw new Error(json.message || res.statusText);
-  return { updated: true, id: json.id, priority: json._links?.priority?.title };
-}
+          } else if (p.action === "priority") {
+            if (!p.wp_id)       return JSON.stringify({ error: "wp_id is required for priority." });
+            if (!p.priority_id) return JSON.stringify({ error: "priority_id is required for priority." });
+            const current = await opRequest(api, headers, "GET", `/work_packages/${p.wp_id}`);
+            const body = {
+              lockVersion: current.lockVersion,
+              _links: { priority: { href: `${api}/priorities/${p.priority_id}` } },
+            };
+            const json = await opRequest(api, headers, "PATCH", `/work_packages/${p.wp_id}`, body);
+            result = { updated: true, id: json.id, priority: json._links?.priority?.title };
 
-function formatWP(wp) {
-  return {
-    id:        wp.id,
-    subject:   wp.subject,
-    status:    wp._links?.status?.title,
-    priority:  wp._links?.priority?.title,
-    assignee:  wp._links?.assignee?.title || null,
-    type:      wp._links?.type?.title,
-    updatedAt: wp.updatedAt,
-  };
-}
-</script>
-</body>
+          } else {
+            return JSON.stringify({ error: "Unknown action: " + p.action });
+          }
+
+          return JSON.stringify({ result });
+        } catch (e) {
+          console.error(e);
+          return JSON.stringify({ error: "OpenProject request failed: " + e.message });
+        }
+      };
+    </script>
+  </body>
 </html>
